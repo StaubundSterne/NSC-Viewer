@@ -706,8 +706,15 @@
             // --- 1. SETUP & LOADING (CLOUD-MODUS VIA GITHUB) ---
 
             // Beim Start der Seite direkt aus der Cloud laden (oder über den Button)
+
+            // Beim Klick auf den Button ebenfalls manuell laden
             document.getElementById('btnLoad').addEventListener('click', async () => {
                 await loadNscsFromCloud();
+            });
+
+            // Automatisch beim Seitenaufruf ausführen
+            document.addEventListener('DOMContentLoaded', () => {
+                loadNscsFromCloud();
             });
 
             async function loadNscsFromCloud() {
