@@ -703,29 +703,70 @@
             let currentYear = 1009;
             let activeFilters = {};
 
-            // --- 1. SETUP & LOADING ---
+            // --- 1. SETUP & LOADING (CLOUD-MODUS VIA GITHUB) ---
+
+            // Beim Start der Seite direkt aus der Cloud laden (oder über den Button)
             document.getElementById('btnLoad').addEventListener('click', async () => {
-                try {
-                    if (!window.showDirectoryPicker) { alert("Browser nicht unterstützt. Bitte Chrome/Edge nutzen."); return; }
-                    dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
-                    document.getElementById('startOverlay').style.display = 'none';
-                    await loadFiles();
-                } catch (e) { console.error(e); }
+                await loadNscsFromCloud();
             });
 
-            async function loadFiles() {
+            async function loadNscsFromCloud() {
                 nscDatabase = [];
-                for await (const entry of dirHandle.values()) {
-                    if (entry.kind === 'file' && entry.name.endsWith('.json')) {
+
+                try {
+                    // --- SCHRITT A: Automatische Dateierkennung über die GitHub-API ---
+                    // WICHTIG: Ersetze 'DEIN_GITHUB_BENUTZERNAME' und 'DEIN_REPO_NAME' mit deinen echten Daten!
+                    const githubUser = "DEIN_GITHUB_BENUTZERNAME";
+                    const repoName = "DEIN_REPO_NAME";
+                    const apiUrl = `https://api.github.com/repos/${githubUser}/${repoName}/contents/nsc`;
+
+                    const response = await fetch(apiUrl);
+                    if (!response.ok) throw new Error("GitHub-Verzeichnis konnte nicht automatisch ausgelesen werden.");
+
+                    const files = await response.json();
+
+                    // Filtere alle Dateien heraus, die auf .json enden
+                    const jsonFiles = files.filter(file => file.name.endsWith('.json'));
+
+                    // Lade jede gefundene NSC-Datei automatisch herunter
+                    for (const fileObj of jsonFiles) {
                         try {
-                            const file = await entry.getFile();
-                            const text = await file.text();
-                            const json = JSON.parse(text);
-                            json._filename = entry.name; // Wichtig für Speichern
+                            const fileRes = await fetch(fileObj.download_url);
+                            if (!fileRes.ok) continue;
+
+                            const json = await fileRes.json();
+                            json._filename = fileObj.name; // Speichert den Dateinamen für spätere Updates
                             nscDatabase.push(json);
-                        } catch (e) { console.warn("Skip " + entry.name); }
+                        } catch (err) {
+                            console.warn(`Konnte NSC ${fileObj.name} nicht laden:`, err);
+                        }
+                    }
+
+                } catch (err) {
+                    console.warn("API-Abruf fehlgeschlagen (evtl. Rate-Limit oder lokaler Test). Nutze Fallback:", err);
+
+                    // --- SCHRITT B: Manueller Fallback (falls die API blockiert wird) ---
+                    const fallbackFiles = [
+                        "gerbold_wackerstein.json",
+                        "brandan_finsterblick.json"
+                    ];
+
+                    for (const filename of fallbackFiles) {
+                        try {
+                            const res = await fetch(`./nsc/${filename}`);
+                            if (res.ok) {
+                                const json = await res.json();
+                                json._filename = filename;
+                                nscDatabase.push(json);
+                            }
+                        } catch (e) {
+                            console.warn(`Fallback konnte ${filename} nicht laden.`);
+                        }
                     }
                 }
+
+                // Start-Overlay ausblenden und Liste rendern
+                document.getElementById('startOverlay').style.display = 'none';
                 filterList();
             }
 
@@ -879,6 +920,9 @@
                                     <span class="status-emoji ${nsc.general.canonical ? 'active' : ''}" 
                                         title="Kanonisch" onclick="toggleEmoji('${nsc.id}', 'general.canonical', this)">📚</span>
 
+                                    <button class="save-btn-inline" onclick="exportNscToHtml('${nsc.id}')" title="Als HTML exportieren" style="margin-left: auto;">🪪</button>
+                                    <button class="save-btn-inline" onclick="copyNscToClipboard('${nsc.id}', this)" title="JSON in Zwischenablage kopieren">📤</button>
+                                    <button class="save-btn-inline" onclick="pasteJsonToNsc('${nsc.id}', this)" title="JSON aus Zwischenablage ergänzen">📥</button>   
                                     <button class="save-btn-inline" onclick="saveFile('${nsc.id}')" title="Speichern">💾</button>
                             </div>
 
@@ -1230,6 +1274,383 @@
                     current = current[parts[i]];
                 }
                 current[parts[parts.length - 1]] = lines;
+            }
+
+            function exportNscToHtml(id) {
+                const nsc = nscDatabase.find(n => n.id === id);
+                if (!nsc) return;
+
+                const age = currentYear - (parseInt(nsc.general?.['birth-year']) || 1000);
+                const traitsText = Array.isArray(nsc.personality?.traits)
+                    ? nsc.personality.traits.join(', ')
+                    : (nsc.personality?.traits || '-');
+
+                const scInjectText = Array.isArray(nsc['sc-inject']?.['injection-points'])
+                    ? nsc['sc-inject']['injection-points'].join('\n')
+                    : (nsc['sc-inject']?.['injection-points'] || '-');
+
+                const activeScs = nsc['sc-inject']?.sc?.join(', ') || 'Keine SC-Bezüge';
+
+                const htmlContent = `<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NSC-Datenblatt: ${nsc.general?.name || 'Unbenannte Person'}</title>
+    <style>
+        :root {
+            --card-bg: #f4e4bc;
+            --card-border: #8b5e3c;
+            --text-main: #2b1d0e;
+            --accent: #8b0000;
+        }
+        body {
+            background-color: #121212;
+            color: var(--text-main);
+            font-family: 'Georgia', serif;
+            display: flex;
+            justify-content: center;
+            padding: 20px;
+            margin: 0;
+        }
+        .export-card {
+            width: 600px;
+            background: var(--card-bg);
+            border: 4px double var(--card-border);
+            padding: 20px;
+            box-shadow: 0 0 15px rgba(0,0,0,0.5);
+            box-sizing: border-box;
+        }
+        h1 {
+            margin: 0 0 5px 0;
+            font-size: 1.8em;
+            color: var(--text-main);
+            border-bottom: 2px solid var(--accent);
+        }
+        .sub-header {
+            font-size: 1.1em;
+            color: var(--accent);
+            margin-bottom: 15px;
+            font-weight: bold;
+        }
+        .section-title {
+            font-weight: bold;
+            border-bottom: 1px dashed var(--text-main);
+            margin: 15px 0 8px 0;
+            font-variant: small-caps;
+            font-size: 1.1em;
+            color: var(--accent);
+        }
+        .kv-grid {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 4px;
+            font-size: 0.95em;
+        }
+        .kv-label {
+            color: #555;
+        }
+        .stats-row {
+            display: flex;
+            justify-content: space-between;
+            background: rgba(0,0,0,0.08);
+            padding: 8px;
+            border-radius: 4px;
+            text-align: center;
+            margin-top: 5px;
+        }
+        .stat-box {
+            display: flex;
+            flex-direction: column;
+        }
+        .stat-val {
+            font-weight: bold;
+            font-size: 1.1em;
+        }
+        .notes-box {
+            background: rgba(255,255,255,0.4);
+            border: 1px solid rgba(0,0,0,0.15);
+            padding: 10px;
+            white-space: pre-wrap;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+        .status-badges {
+            display: flex;
+            gap: 10px;
+            font-size: 0.85em;
+            margin-bottom: 10px;
+            background: rgba(0,0,0,0.04);
+            padding: 5px 8px;
+        }
+        @media print {
+            body { background: white; padding: 0; }
+            .export-card { width: 100%; border: 1px solid #000; box-shadow: none; }
+        }
+    </style>
+</head>
+<body>
+    <div class="export-card">
+        <h1>${nsc.general?.name || 'Unbenannte Person'}</h1>
+        <div class="sub-header">
+            ${nsc.profession?.category || 'Unbekannt'} 
+            ${nsc.profession?.specification ? '– ' + nsc.profession.specification : ''} 
+            (${age} Jahre, ${nsc.general?.gender || 'unbekannt'})
+        </div>
+
+        <div class="status-badges">
+            <span>Status: ${nsc.general?.alive ? 'Lebendig' : 'Verstorben 💀'}</span> |
+            <span>Spezies: ${nsc.general?.species || '-'}</span> |
+            <span>Kultur: ${nsc.general?.culture || '-'}</span> |
+            <span>Kanonisch: ${nsc.general?.canonical ? 'Ja 📚' : 'Nein'}</span>
+        </div>
+
+        <div class="section-title">💉 Anregungen & Plot-Ideen</div>
+        <div class="kv-grid">
+            <span class="kv-label">Held:innen-Bezug:</span>
+            <span>${activeScs}</span>
+        </div>
+        <div class="notes-box">${scInjectText}</div>
+
+        <div class="section-title">💃 Erscheinung</div>
+        <div style="margin-bottom: 8px;"><strong>Besondere Merkmale:</strong> ${nsc.appearance?.distinguishing_features || '-'}</div>
+        <div class="kv-grid">
+            <span class="kv-label">Größe:</span><span>${nsc.appearance?.size || '-'}</span>
+            <span class="kv-label">Gewicht:</span><span>${nsc.appearance?.weight || '-'}</span>
+            <span class="kv-label">Haare:</span><span>${nsc.appearance?.hair || '-'}</span>
+            <span class="kv-label">Haut:</span><span>${nsc.appearance?.skin || '-'}</span>
+            <span class="kv-label">Augen:</span><span>${nsc.appearance?.eyes || '-'}</span>
+            <span class="kv-label">Kleidung/Ausrüstung:</span>
+            <span>
+                ${[
+                        nsc.appearance?.outfit?.headgear,
+                        nsc.appearance?.outfit?.top,
+                        nsc.appearance?.outfit?.trousers,
+                        nsc.appearance?.outfit?.footwear,
+                        nsc.appearance?.outfit?.jewellery,
+                        nsc.appearance?.outfit?.things,
+                        nsc.appearance?.outfit?.weapons
+                    ].filter(Boolean).join(', ') || '-'}
+            </span>
+        </div>
+
+        <div class="section-title">🤦‍♂️ Persönlichkeit</div>
+        <div style="margin-bottom: 8px;"><strong>Motivation:</strong> ${nsc.personality?.motivation || '-'}</div>
+        <div class="kv-grid">
+            <span class="kv-label">Eigenschaften:</span><span>${traitsText}</span>
+            <span class="kv-label">Stimmung:</span><span>${nsc.personality?.['actual-mood'] || '-'}</span>
+            <span class="kv-label">Seelentier:</span><span>${nsc.general?.['soul-animal'] || '-'}</span>
+            <span class="kv-label">Hintergrund:</span><span>${nsc.personality?.['family-background'] || '-'}</span>
+        </div>
+
+        <div class="section-title">⚔️ Eigenschaften & Werte</div>
+        <div class="stats-row">
+            ${['MU', 'KL', 'IN', 'CH', 'FF', 'GE', 'KO', 'KK'].map(stat => `
+                <div class="stat-box">
+                    <small>${stat}</small>
+                    <span class="stat-val">${nsc.stats?.attributes?.[stat] || 8}</span>
+                </div>
+            `).join('')}
+        </div>
+
+        <div class="section-title">📝 Chronik & Spielnotizen</div>
+        <div class="notes-box">${nsc['session-notes'] || 'Keine Eintragsnotizen vorhanden.'}</div>
+    </div>
+</body>
+</html>`;
+
+                // Datei im Browser zum Download an bieten
+                const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8;' });
+                const link = document.createElement('a');
+                const safeFilename = (nsc.general?.name || 'NSC').replace(/[^a-z0-9äöüß_]/gi, '_');
+                link.href = URL.createObjectURL(blob);
+                link.download = `Aventurische_Werkbank_NSC_${safeFilename}.html`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(link.href);
+            }
+
+            // --- NSC JSON-EXPORT & CLIPBOARD ---
+
+            async function copyNscToClipboard(id, btnElement = null) {
+                const nsc = nscDatabase.find(n => n.id === id);
+                if (!nsc) return;
+
+                // Tiefenkopie erstellen (Verwendung von structuredClone falls verfügbar)
+                const exportData = typeof structuredClone === 'function'
+                    ? structuredClone(nsc)
+                    : JSON.parse(JSON.stringify(nsc));
+
+                // Interne Hilfsfelder entfernen
+                delete exportData._filename;
+
+                // Formatiertes JSON aufbereiten
+                const jsonString = JSON.stringify(exportData, null, 4);
+                let success = false;
+
+                // 1. Primär: Moderne Async Clipboard API
+                if (navigator.clipboard && window.isSecureContext) {
+                    try {
+                        await navigator.clipboard.writeText(jsonString);
+                        success = true;
+                    } catch (err) {
+                        console.warn('Clipboard API fehlgeschlagen, wechsle auf Fallback:', err);
+                    }
+                }
+
+                // 2. Sekundär: Fallback für ungesicherte / ältere Kontexte
+                if (!success) {
+                    success = fallbackCopyTextToClipboard(jsonString);
+                }
+
+                // 3. Visuelles Feedback auslösen
+                if (success) {
+                    // Nutzt primär das direkt übergebene Button-Element, sonst CSS-Fallback
+                    const btn = btnElement || document.querySelector(`#card-${id} button[onclick*="copyNscToClipboard"]`);
+                    if (btn) {
+                        const originalText = btn.innerText;
+                        btn.innerText = "✅";
+                        setTimeout(() => { btn.innerText = originalText; }, 1500);
+                    }
+                }
+            }
+
+            function fallbackCopyTextToClipboard(text) {
+                const textArea = document.createElement("textarea");
+                textArea.value = text;
+
+                // Unsichtbar positionieren ohne UI-Jumps
+                textArea.style.position = "fixed";
+                textArea.style.top = "0";
+                textArea.style.left = "0";
+                textArea.style.width = "2em";
+                textArea.style.height = "2em";
+                textArea.style.padding = "0";
+                textArea.style.border = "none";
+                textArea.style.outline = "none";
+                textArea.style.boxShadow = "none";
+                textArea.style.background = "transparent";
+                textArea.style.opacity = "0";
+
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+
+                let successful = false;
+                try {
+                    successful = document.execCommand('copy');
+                } catch (err) {
+                    console.error('Fallback-Kopieren fehlgeschlagen:', err);
+                    alert("Kopieren fehlgeschlagen. Bitte manuell kopieren.");
+                }
+
+                document.body.removeChild(textArea);
+                return successful;
+            }
+
+            // --- NSC JSON-IMPORT / MERGE AUS DER ZWISCHENABLAGE (GEHÄRTETE VERSION) ---
+
+            async function pasteJsonToNsc(id, btnElement = null) {
+                const nsc = nscDatabase.find(n => n.id === id);
+                if (!nsc) return;
+
+                let pasteText = "";
+
+                // 1. Zwischenablage auslesen mit verbessertem Permission- & Error-Handling
+                try {
+                    if (navigator.clipboard && window.isSecureContext) {
+                        pasteText = await navigator.clipboard.readText();
+                    } else {
+                        pasteText = prompt("Bitte das einzufügende JSON hier hineinkopieren:");
+                    }
+                } catch (err) {
+                    console.warn("Clipboard-Lesezugriff blockiert/fehlgeschlagen, nutze Prompt-Fallback:", err);
+                    pasteText = prompt("Zwischenablage konnte nicht direkt gelesen werden.\nBitte JSON hier hineinkopieren:");
+                }
+
+                if (!pasteText || !pasteText.trim()) return;
+
+                // 2. JSON-Gültigkeit prüfen
+                let parsedData = null;
+                try {
+                    parsedData = JSON.parse(pasteText);
+                } catch (e) {
+                    alert("Fehler: Der Inhalt ist kein gültiges JSON!\n\n" + e.message);
+                    return;
+                }
+
+                if (typeof parsedData !== 'object' || parsedData === null || Array.isArray(parsedData)) {
+                    alert("Fehler: Das einzufügende JSON muss ein Objekt sein (z. B. {\"combat\": ...}).");
+                    return;
+                }
+
+                // 3. Intelligenter Tiefen-Merge (Duplikate in Arrays werden vermieden)
+                deepMergeAppend(nsc, parsedData);
+
+                // 4. Visuelles Feedback auslösen
+                const btn = btnElement || document.querySelector(`#card-${id} button[onclick*="pasteJsonToNsc"]`);
+                if (btn) {
+                    const origText = btn.innerText;
+                    btn.innerText = "✅";
+                    setTimeout(() => { btn.innerText = origText; }, 1500);
+                }
+
+                // 5. Karte im DOM aktualisieren, damit die neuen Daten sofort sichtbar sind
+                refreshCardUI(id);
+            }
+
+            /**
+             * Hilfsfunktion zum rekursiven Ergänzen und Anhängen von JSON-Daten
+             * Verhindert Duplikate in Arrays (z.B. bei Waffen, Talenten, Zaubern) anhand von 'name' oder 'id'.
+             */
+            function deepMergeAppend(target, source) {
+                for (const key in source) {
+                    if (!source.hasOwnProperty(key)) continue;
+
+                    // Interne Steuerungsfelder schützen
+                    if (key === '_filename') continue;
+
+                    // Wenn beide Ziel- und Quellwerte Arrays sind -> Intelligent zusammenführen (Duplikate verhindern)
+                    if (Array.isArray(target[key]) && Array.isArray(source[key])) {
+                        source[key].forEach(newItem => {
+                            const isDuplicate = target[key].some(existingItem => {
+                                if (typeof existingItem === 'object' && existingItem !== null && typeof newItem === 'object' && newItem !== null) {
+                                    return (existingItem.name && existingItem.name === newItem.name) ||
+                                        (existingItem.id && existingItem.id === newItem.id);
+                                }
+                                return existingItem === newItem;
+                            });
+                            if (!isDuplicate) {
+                                target[key].push(newItem);
+                            }
+                        });
+                    }
+                    // Wenn beide Werte Objekte sind -> Rekursiv weiter mergen
+                    else if (
+                        target[key] && typeof target[key] === 'object' && !Array.isArray(target[key]) &&
+                        source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])
+                    ) {
+                        deepMergeAppend(target[key], source[key]);
+                    }
+                    // Ansonsten: Wert hinzufügen oder überschreiben
+                    else {
+                        target[key] = source[key];
+                    }
+                }
+            }
+
+            /**
+             * Schließt die Karte kurz und öffnet sie neu, um die erweiterte Datenstruktur im DOM abzubilden
+             */
+            function refreshCardUI(id) {
+                const cardEl = document.getElementById(`card-${id}`);
+                if (cardEl) {
+                    cardEl.remove();
+                    openCards.delete(id);
+                    const nsc = nscDatabase.find(n => n.id === id);
+                    if (nsc) createCard(nsc);
+                }
             }
 
         </script>
